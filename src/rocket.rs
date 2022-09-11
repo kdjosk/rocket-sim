@@ -1,19 +1,28 @@
 use bevy::prelude::*;
-use bevy_rapier2d::{prelude::*, rapier::prelude::{JointAxis, JointAxesMask}};
+use bevy_rapier2d::{prelude::*, rapier::prelude::{JointAxis, JointAxesMask, ColliderMassProps}};
 
-pub struct TwoStageRocket<'a> {
-    first_stage: Stage<'a>,
-    second_stage: Stage<'a>,
+struct TwoStageRocket {
+    first_stage: Stage,
+    second_stage: Stage,
     landing_leg: LandingLeg,
 }
 
-pub struct Stage<'a> {
+struct Stage {
     height: f32,
     diameter: f32,
-    engines: &'a [Engine],
+    engine: Engine,
+    num_engines: i8,
+    dry_mass: f32,
+    propellant_mass: f32,
 }
 
-pub struct Engine {
+impl Stage {
+    fn lift_off_mass(&self) -> f32 {
+        self.dry_mass + self.propellant_mass
+    }
+}
+
+struct Engine {
     isp_asl: f32,
     isp_vac: f32,
     thrust_asl: f32,
@@ -21,37 +30,37 @@ pub struct Engine {
 }
 
 #[derive(Component)]
-pub struct TrackedByCamera; 
+struct TrackedByCamera; 
 
 #[derive(Component)]
-pub struct ColdGasThruster {
+struct ColdGasThruster {
     pub force: f32
 }
 
 #[derive(Component)]
-pub struct MainEngine {
+struct MainEngine {
     pub force: f32
 }
 
 #[derive(Component, Clone)]
-pub struct LandingLeg {
+struct LandingLeg {
     length: f32,
     mass: f32,
     width: f32,
 }
 
-pub struct Ground {
+struct Ground {
     height: f32,
     width: f32,
 }
 
 #[derive(Component, Debug)]
-pub enum Side {
+enum Side {
     Left,
     Right,
 }
 
-pub const PX_PER_METER: f32 = 10.0;
+pub const PX_PER_METER: f32 = 15.0;
 
 impl Engine {
     pub const MERLIN_1D: Self = Self {
@@ -69,69 +78,71 @@ impl Engine {
     };
 }
 
-impl TwoStageRocket<'static> {
+impl TwoStageRocket {
     // https://forum.nasaspaceflight.com/index.php?topic=41947.0
     pub const FALCON_9_V_1_2: Self = Self {
         first_stage: Stage {
                 height: 42.6 * PX_PER_METER,
                 diameter: 3.66 * PX_PER_METER,
-                engines: &[
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                    Engine::MERLIN_1D,
-                ]
+                dry_mass: 22_200.0,
+                propellant_mass: 411_000.0,
+                engine: Engine::MERLIN_1D,
+                num_engines: 9,
             },
         second_stage: Stage {
                 height: 27.4 * PX_PER_METER,
                 diameter: 3.66 * PX_PER_METER,
-                engines: &[
-                    Engine::MERLIN_1D_VAC,
-                ]
+                dry_mass: 4_000.0,
+                propellant_mass: 107_500.0,
+                engine: Engine::MERLIN_1D_VAC,
+                num_engines: 9,
             },
-        landing_leg: LandingLeg { length: 10.0 * PX_PER_METER, width: 0.3 * PX_PER_METER, mass: 600.0 }
+        landing_leg: LandingLeg {
+            length: 10.0 * PX_PER_METER,
+            width: 0.5 * PX_PER_METER,
+            mass: 600.0
+        }
     };
-
-    fn height(self) -> f32 {
-        self.first_stage.height + self.second_stage.height
-    }
 }
 
 
 static ROCKET_PART_GROUP: u32 = 0b0001;
 
 
-fn spawn_stage(commands: &mut Commands, stage_height: f32, stage_diameter: f32) -> Entity {
+fn spawn_stage(commands: &mut Commands, stage: &Stage) -> Entity {
     return commands
     .spawn()
     .insert_bundle(SpriteBundle {
         sprite: Sprite {
             color: Color::rgb(1.0, 1.0, 1.0),
-            custom_size: Some(Vec2::new(stage_diameter, stage_height)),
+            custom_size: Some(Vec2::new(stage.diameter, stage.height)),
             ..Default::default()
         },
         ..Default::default()
     })
     .insert(RigidBody::Dynamic)
-    .insert(Collider::cuboid(stage_diameter / 2.0, stage_height / 2.0))
+    .insert(ColliderMassProperties::Mass(stage.lift_off_mass()))
+    .insert(Collider::cuboid(stage.diameter / 2.0, stage.height / 2.0))
     .insert(CollisionGroups::new(ROCKET_PART_GROUP, !ROCKET_PART_GROUP))
     .insert(Ccd::enabled()).id();
 }
 
 
-pub fn spawn_falcon9_rocket(mut commands: Commands) {
+fn spawn_camera(commands: &mut Commands, scale: f32) {
+    let mut camera_bundle = Camera2dBundle::default();
+    camera_bundle.projection.scale = scale;
+    commands.spawn_bundle(camera_bundle);
+}
+
+
+fn spawn_falcon9_rocket(mut commands: Commands) {
     let rocket = &TwoStageRocket::FALCON_9_V_1_2;
 
-    let first_stage = spawn_stage(&mut commands, rocket.first_stage.height, rocket.first_stage.diameter);
+    let first_stage = spawn_stage(&mut commands, &rocket.first_stage);
+
+    spawn_camera(&mut commands, 0.5);
 
     commands.entity(first_stage).insert(TrackedByCamera);
-
-    commands.spawn_bundle(Camera2dBundle::default());
     
     add_cold_gas_thruster(
         &mut commands,
@@ -241,10 +252,10 @@ fn add_landing_legs(commands: &mut Commands, rocket_id: Entity, y_pos: f32, sepa
     let tf = Transform::from_xyz(
         -separation / 2.0,
         y_pos,
-        1.0,
+        -10.0,
     ).with_rotation(Quat::from_rotation_z(leg_angle));
-    commands.spawn_bundle(TransformBundle::from(tf))
-        .insert_bundle(SpriteBundle {
+    commands
+        .spawn_bundle(SpriteBundle {
             sprite: Sprite {
                 color: Color::rgb(0.0, 0.0, 0.0),
                 custom_size: Some(Vec2::new(leg.width, leg.length)),
@@ -274,11 +285,11 @@ fn add_landing_legs(commands: &mut Commands, rocket_id: Entity, y_pos: f32, sepa
     let tf = Transform::from_xyz(
         separation / 2.0,
         y_pos,
-        0.0,
+        -10.0,
     ).with_rotation(Quat::from_rotation_z(-leg_angle));
 
-    commands.spawn_bundle(TransformBundle::from(tf))
-        .insert_bundle(SpriteBundle {
+    commands
+        .spawn_bundle(SpriteBundle {
             sprite: Sprite {
                 color: Color::rgb(0.0, 0.0, 0.0),
                 custom_size: Some(Vec2::new(leg.width, leg.length)),
@@ -296,7 +307,7 @@ fn add_landing_legs(commands: &mut Commands, rocket_id: Entity, y_pos: f32, sepa
         .insert(Ccd::enabled());
 }
 
-pub fn motor_control(
+fn motor_control(
     keyboard_input: Res<Input<KeyCode>>,
     mut query: Query<(&ColdGasThruster, &mut ExternalImpulse, &Side, &Transform)>,
 ) {
@@ -316,7 +327,7 @@ pub fn motor_control(
     }
 }
 
-pub fn engine_control(
+fn engine_control(
     keyboard_input: Res<Input<KeyCode>>,
     mut query: Query<(&MainEngine, &mut ExternalImpulse, &Transform)>,
 ) {
@@ -327,7 +338,7 @@ pub fn engine_control(
     }
 }
 
-pub fn landing_leg_control(
+fn landing_leg_control(
     keyboard_input: Res<Input<KeyCode>>,
     mut query: Query<(&mut ImpulseJoint, &Side), With<LandingLeg>>,
 ) {
@@ -340,15 +351,46 @@ pub fn landing_leg_control(
                     JointAxis::AngX,
                     0.0,
                     0.0,
-                    10000.0,
+                    10e9,
                     1000.0),
                 Side::Right => joint.data.set_motor(
                     JointAxis::AngX,
                     0.0,
                     0.0,
-                    10000.0,
+                    10e9,
                     1000.0),
             };
         }
+    }
+}
+
+fn update_camera(mut query: Query<(&mut Transform, Option<&Camera>, Option<&TrackedByCamera>)>) {
+    let mut obj_tf = Transform::default();
+    for (tf, _, obj) in query.iter_mut() {
+        if let Some(_) = obj {
+            obj_tf = tf.clone();
+        }
+    }
+
+    for (mut tf, camera, _) in query.iter_mut() {
+        if let Some(_) = camera {
+            tf.translation = obj_tf.translation;
+            tf.translation.y -= 100.0;
+        }
+    }
+}
+
+pub struct RocketSimPlugin;
+
+impl Plugin for RocketSimPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            .add_startup_system(spawn_falcon9_rocket)
+            .add_system(motor_control)
+            .add_system(engine_control)
+            .add_system(landing_leg_control)
+            .add_system(update_camera)
+            .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(PX_PER_METER))
+            .add_plugin(RapierDebugRenderPlugin::default());
     }
 }
